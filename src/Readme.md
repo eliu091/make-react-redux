@@ -1,129 +1,72 @@
-在重构 ThemeSwitch 的时候我们发现，ThemeSwitch 除了需要 store 里面的数据以外，还需要 store 来 dispatch：
+我们要把 context 相关的代码从所有业务组件中清除出去，现在的代码里面还有一个地方是被污染的。那就是 src/index.js 里面的 Index：
 
 ```javascript
-  // dispatch action 去改变颜色
-  handleSwitchColor (color) {
-    const { store } = this.context
-    store.dispatch({
-      type: 'CHANGE_COLOR',
-      themeColor: color
-    })
-  }
-```
-目前版本的 connect 是达不到这个效果的，我们需要改进它。
-
-想一下，既然可以通过给 connect 函数传入 mapStateToProps 来告诉它如何获取、整合状态，我们也可以想到，可以给它传入另外一个参数来告诉它我们的组件需要如何触发 dispatch。我们把这个参数叫 mapDispatchToProps：
-
-```javascript
-const mapDispatchToProps = (dispatch) => {
-  return {
-    onSwitchColor: (color) => {
-      dispatch({ type: 'CHANGE_COLOR', themeColor: color })
-    }
-  }
-}
-```
-
-和 mapStateToProps 一样，它返回一个对象，这个对象内容会同样被 connect 当作是 props 参数传给被包装的组件。不一样的是，这个函数不是接受 state 作为参数，而是 dispatch，你可以在返回的对象内部定义一些函数，这些函数会用到 dispatch 来触发特定的 action。
-
-调整 connect 让它能接受这样的 mapDispatchToProps：
-
-```javascript
-export const connect = (mapStateToProps, mapDispatchToProps) => (WrappedComponent) => {
-  class Connect extends Component {
-    static contextTypes = {
-      store: PropTypes.object
-    }
-
-    constructor () {
-      super()
-      this.state = {
-        allProps: {}
-      }
-    }
-
-    componentWillMount () {
-      const { store } = this.context
-      this._updateProps()
-      store.subscribe(() => this._updateProps())
-    }
-
-    _updateProps () {
-      const { store } = this.context
-      let stateProps = mapStateToProps
-        ? mapStateToProps(store.getState(), this.props)
-        : {} // 防止 mapStateToProps 没有传入
-      let dispatchProps = mapDispatchToProps
-        ? mapDispatchToProps(store.dispatch, this.props)
-        : {} // 防止 mapDispatchToProps 没有传入
-      this.setState({
-        allProps: {
-          ...stateProps,
-          ...dispatchProps,
-          ...this.props
-        }
-      })
-    }
-
-    render () {
-      return <WrappedComponent {...this.state.allProps} />
-    }
-  }
-  return Connect
-}
-```
-
-在 _updateProps 内部，我们把store.dispatch 作为参数传给 mapDispatchToProps ，它会返回一个对象 dispatchProps。接着把 stateProps、dispatchProps、this.props 三者合并到 this.state.allProps 里面去，这三者的内容都会在 render 函数内全部传给被包装的组件。
-
-另外，我们稍微调整了一下，在调用 mapStateToProps 和 mapDispatchToProps 之前做判断，让这两个参数都是可以缺省的，这样即使不传这两个参数程序也不会报错。
-
-这时候我们就可以重构 ThemeSwitch，让它摆脱 store.dispatch：
-
-```javascript
-import React, { Component } from 'react'
-import PropTypes from 'prop-types'
-import { connect } from './react-redux'
-
-class ThemeSwitch extends Component {
-  static propTypes = {
-    themeColor: PropTypes.string,
-    onSwitchColor: PropTypes.func
+class Index extends Component {
+  static childContextTypes = {
+    store: PropTypes.object
   }
 
-  handleSwitchColor (color) {
-    if (this.props.onSwitchColor) {
-      this.props.onSwitchColor(color)
-    }
+  getChildContext () {
+    return { store }
   }
 
   render () {
     return (
       <div>
-        <button
-          style={{ color: this.props.themeColor }}
-          onClick={this.handleSwitchColor.bind(this, 'red')}>Red</button>
-        <button
-          style={{ color: this.props.themeColor }}
-          onClick={this.handleSwitchColor.bind(this, 'blue')}>Blue</button>
+        <Header />
+        <Content />
       </div>
     )
   }
 }
+```
 
-const mapStateToProps = (state) => {
-  return {
-    themeColor: state.themeColor
+其实它要用 context 就是因为要把 store 存放到里面，好让子组件 connect 的时候能够取到 store。我们可以额外构建一个组件来做这种脏活，然后让这个组件成为组件树的根节点，那么它的子组件都可以获取到 context 了。
+
+我们把这个组件叫 Provider，因为它提供（provide）了 store：
+
+
+在 src/react-redux.js 新增代码：
+
+```javascript
+export class Provider extends Component {
+  static propTypes = {
+    store: PropTypes.object,
+    children: PropTypes.any
   }
-}
-const mapDispatchToProps = (dispatch) => {
-  return {
-    onSwitchColor: (color) => {
-      dispatch({ type: 'CHANGE_COLOR', themeColor: color })
+
+  static childContextTypes = {
+    store: PropTypes.object
+  }
+
+  getChildContext () {
+    return {
+      store: this.props.store
     }
   }
-}
-ThemeSwitch = connect(mapStateToProps, mapDispatchToProps)(ThemeSwitch)
 
-export default ThemeSwitch
+  render () {
+    return (
+      <div>{this.props.children}</div>
+    )
+  }
+}
 ```
-光看 ThemeSwitch 内部，是非常清爽干净的，只依赖外界传进来的 themeColor 和 onSwitchColor。但是 ThemeSwitch 内部并不知道这两个参数其实都是我们去 store 里面取的，它是 Dumb 的。这时候这三个组件的重构都已经完成了，代码大大减少、不依赖 context，并且功能和原来一样。
+Provider 做的事情也很简单，它就是一个容器组件，会把嵌套的内容原封不动作为自己的子组件渲染出来。它还会把外界传给它的 props.store 放到 context，这样子组件 connect 的时候都可以获取到。
+
+可以用它来重构我们的 src/index.js：
+
+```javascript
+// 头部引入 Provider
+import { Provider } from './react-redux'
+
+// 把 Provider 作为组件树的根节点
+ReactDOM.render(
+  <Provider store={store}>
+    <Index />
+  </Provider>,
+  document.getElementById('root')
+)
+```
+
+这样我们就把所有关于 context 的代码从组件里面删除了。
